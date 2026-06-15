@@ -4,12 +4,20 @@ set -euo pipefail
 export PYTHONPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd):${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 device="${DEVICE:-cuda}"
 steps="${BENCHMARK_STEPS:-100}"
 val_steps="${BENCHMARK_VAL_STEPS:-30}"
 num_workers="${NUM_WORKERS:-4}"
-embedding_mode="${EMBEDDING_MODE:-zeros}"
-embed_root="${EMBED_ROOT:-./Embeddings}"
+embedding_mode="zeros"
+
+echo "Benchmark configuration:"
+echo "  device=${device}"
+echo "  embedding_mode=${embedding_mode} (timing-only; no embedding files required)"
+echo "  train_steps=${steps} (0 means full epoch)"
+echo "  val_steps=${val_steps} (0 means full validation)"
 
 run_benchmark() {
   local horizon="$1"
@@ -32,7 +40,6 @@ run_benchmark() {
   python -u train.py \
     --device "$device" \
     --root_path ./dataset \
-    --embed_root "$embed_root" \
     --embedding_mode "$embedding_mode" \
     --data_path Weather \
     --num_nodes 21 \
