@@ -24,11 +24,13 @@ class GenPromptEmb(nn.Module):
         self.len = self.input_len-1
         self.prompt_batch_size = prompt_batch_size
 
+        print(f"Loading tokenizer and model: {model_name}", flush=True)
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = GPT2Model.from_pretrained(model_name).to(self.device)
         self.model.eval()
         self.model.requires_grad_(False)
+        print(f"GPT-2 is ready on {self.device}", flush=True)
 
     def _prepare_prompt(self, input_template, in_data, in_data_mark, i, j):
         # Time series value

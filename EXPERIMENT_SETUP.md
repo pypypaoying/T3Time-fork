@@ -45,11 +45,18 @@ for split in train val test; do
     --divide "$split" \
     --batch_size 1 \
     --prompt_batch_size 8 \
+    --num_workers 0 \
+    --log_interval 50 \
     --device cuda
 done
 ```
 
 For ILI, use `--output_len 24`. For the other datasets, use `96`.
+Embedding generation prints progress and an ETA. It also resumes safely by
+skipping existing HDF5 files; pass `--overwrite` only when the cache must be
+regenerated. Prompt construction remains on CPU while GPT-2 inference runs on
+the selected device, which avoids per-value CUDA synchronization without
+changing the prompts or embeddings.
 
 ## Timing Benchmark
 
