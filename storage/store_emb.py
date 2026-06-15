@@ -102,7 +102,7 @@ def save_embeddings(args):
     completed = 0
     generated = 0
     started_at = time.perf_counter()
-    for x, y, x_mark, y_mark`in data_loader:
+    for x, y, x_mark, y_mark in data_loader:
         batch_indices = list(range(sample_offset, sample_offset + len(x)))
         output_paths = [
             os.path.join(save_path, f"{sample_index}.h5")
