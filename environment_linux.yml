@@ -1,0 +1,17 @@
+name: t3time
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch=2.2.2
+  - pytorch-cuda=12.1
+  - numpy=1.23.5
+  - pandas=1.5.3
+  - h5py>=3.10
+  - matplotlib=3.7
+  - pip:
+      - einops==0.8.0
+      - transformers==4.51.3

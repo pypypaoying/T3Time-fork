@@ -17,6 +17,14 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:150"
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda", help="")
+    parser.add_argument("--root_path", type=str, default="./dataset", help="dataset directory")
+    parser.add_argument("--embed_root", type=str, default="./Embeddings", help="embedding directory")
+    parser.add_argument(
+        "--embedding_mode",
+        choices=["precomputed", "zeros"],
+        default="precomputed",
+        help="Use zeros only for timing benchmarks; real experiments require precomputed GPT-2 embeddings.",
+    )
     parser.add_argument("--data_path", type=str, default="ETTm1", help="data path")
     parser.add_argument("--channel", type=int, default=32, help="number of features")
     parser.add_argument("--num_nodes", type=int, default=7, help="number of nodes")
@@ -34,7 +42,10 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="gpt2", help="llm")
     parser.add_argument("--epochs", type=int, default=150, help="")
     parser.add_argument('--seed', type=int, default=2024, help='random seed')
-    parser.add_argument("--es_patience", type=int, default=25, help="quit if no improvement after this many iterations")    
+    parser.add_argument("--es_patience", type=int, default=25, help="quit if no improvement after this many iterations")
+    parser.add_argument("--max_train_steps", type=int, default=0, help="0 runs the full training loader")
+    parser.add_argument("--max_val_steps", type=int, default=0, help="0 runs the full validation loader")
+    parser.add_argument("--skip_test", action="store_true", help="skip final test evaluation")
     parser.add_argument("--save", type=str, default="./logs/" + str(time.strftime("%Y-%m-%d-%H:%M:%S")) + "-", help="save path")
     return parser.parse_args()
 
@@ -98,15 +109,32 @@ def load_data(args):
         'ETTm2': Dataset_ETT_minute
     }
     data_class = data_map.get(args.data_path, Dataset_Custom)
-    train_set = data_class(flag='train', scale=True, size=[args.seq_len, 0, args.pred_len], data_path=args.data_path)
-    val_set = data_class(flag='val', scale=True, size=[args.seq_len, 0, args.pred_len], data_path=args.data_path)
-    test_set = data_class(flag='test', scale=True, size=[args.seq_len, 0, args.pred_len], data_path=args.data_path)
+    dataset_args = dict(
+        root_path=args.root_path,
+        embed_root=args.embed_root,
+        scale=True,
+        size=[args.seq_len, 0, args.pred_len],
+        data_path=args.data_path,
+        embedding_mode=args.embedding_mode,
+        d_llm=args.d_llm,
+    )
+    train_set = data_class(flag='train', **dataset_args)
+    val_set = data_class(flag='val', **dataset_args)
+    test_set = data_class(flag='test', **dataset_args)
 
     scaler = train_set.scaler
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=args.num_workers)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=args.num_workers)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=args.num_workers)
+    loader_args = dict(
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=args.num_workers > 0,
+    )
+    train_loader = DataLoader(train_set, **loader_args)
+    val_loader = DataLoader(val_set, **loader_args)
+    test_loader = DataLoader(test_set, **loader_args)
 
     return train_set, val_set, test_set, train_loader, val_loader, test_loader, scaler
 
@@ -114,11 +142,17 @@ def seed_it(seed):
     random.seed(seed)
     os.environ["PYTHONSEED"] = str(seed)
     np.random.seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.enabled = True
     torch.manual_seed(seed)
+
+def synchronize(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
 
 def main():
     args = parse_args()
@@ -126,11 +160,16 @@ def main():
 
     print()
     seed_it(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        print("CUDA is unavailable; falling back to CPU.")
+        device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
     
     loss = 9999999
     test_log = 999999
     epochs_since_best_mse = 0
+    bestid = 0
 
     path = os.path.join(args.save, args.data_path, 
                         f"{args.pred_len}_{args.channel}_{args.e_layer}_{args.d_layer}_{args.learning_rate}_{args.dropout_n}_{args.seed}/")
@@ -140,6 +179,8 @@ def main():
     his_loss = []
     val_time = []
     train_time = []
+    projected_val_time = []
+    projected_train_time = []
     print(args)
 
     engine = trainer(
@@ -163,42 +204,70 @@ def main():
 
     for i in range(1, args.epochs + 1):
 
-        t1 = time.time()
+        synchronize(device)
+        t1 = time.perf_counter()
         train_loss = []
         train_mae = []
-        
+
         for iter, (x,y,x_mark,y_mark, embeddings) in enumerate(train_loader):
-            trainx = torch.Tensor(x).to(device) # [B, L, N]
-            trainy = torch.Tensor(y).to(device)
-            trainx_mark = torch.Tensor(x_mark).to(device) 
-            train_embedding = torch.Tensor(embeddings).to(device)
+            trainx = x.to(device=device, dtype=torch.float32, non_blocking=True) # [B, L, N]
+            trainy = y.to(device=device, dtype=torch.float32, non_blocking=True)
+            trainx_mark = x_mark.to(device=device, dtype=torch.float32, non_blocking=True)
+            train_embedding = embeddings.to(device=device, dtype=torch.float32, non_blocking=True)
             metrics = engine.train(trainx, trainx_mark, train_embedding, trainy)
             train_loss.append(metrics[0])
             train_mae.append(metrics[1])
+            if args.max_train_steps and iter + 1 >= args.max_train_steps:
+                break
 
-        t2 = time.time()
+        synchronize(device)
+        t2 = time.perf_counter()
+        train_steps = len(train_loss)
+        train_projection = (t2 - t1) * len(train_loader) / train_steps
         log = "Epoch: {:03d}, Training Time: {:.4f} secs"
         print(log.format(i, (t2 - t1)))
+        if train_steps < len(train_loader):
+            print(
+                "Projected full training epoch: {:.4f} secs "
+                "({:d}/{:d} batches measured)".format(
+                    train_projection, train_steps, len(train_loader)
+                )
+            )
         train_time.append(t2 - t1)
+        projected_train_time.append(train_projection)
 
         # validation
         val_loss = []
         val_mae = []
-        s1 = time.time()
+        synchronize(device)
+        s1 = time.perf_counter()
 
         for iter, (x,y,x_mark,y_mark, embeddings) in enumerate(val_loader):
-            valx = torch.Tensor(x).to(device)
-            valy = torch.Tensor(y).to(device)
-            valx_mark = torch.Tensor(x_mark).to(device)
-            val_embedding = torch.Tensor(embeddings).to(device)
+            valx = x.to(device=device, dtype=torch.float32, non_blocking=True)
+            valy = y.to(device=device, dtype=torch.float32, non_blocking=True)
+            valx_mark = x_mark.to(device=device, dtype=torch.float32, non_blocking=True)
+            val_embedding = embeddings.to(device=device, dtype=torch.float32, non_blocking=True)
             metrics = engine.eval(valx, valx_mark, val_embedding, valy)
             val_loss.append(metrics[0])
             val_mae.append(metrics[1])
+            if args.max_val_steps and iter + 1 >= args.max_val_steps:
+                break
 
-        s2 = time.time()
+        synchronize(device)
+        s2 = time.perf_counter()
+        val_steps = len(val_loss)
+        val_projection = (s2 - s1) * len(val_loader) / val_steps
         log = "Epoch: {:03d}, Validation Time: {:.4f} secs"
         print(log.format(i, (s2 - s1)))
+        if val_steps < len(val_loader):
+            print(
+                "Projected full validation: {:.4f} secs "
+                "({:d}/{:d} batches measured)".format(
+                    val_projection, val_steps, len(val_loader)
+                )
+            )
         val_time.append(s2 - s1)
+        projected_val_time.append(val_projection)
 
         mtrain_loss = np.mean(train_loss)
         mtrain_mae = np.mean(train_mae)
@@ -290,13 +359,20 @@ def main():
     # Output consumption
     print("Average Training Time: {:.4f} secs/epoch".format(np.mean(train_time)))
     print("Average Validation Time: {:.4f} secs".format(np.mean(val_time)))
+    if args.max_train_steps:
+        print("Projected Average Training Time: {:.4f} secs/epoch".format(np.mean(projected_train_time)))
+    if args.max_val_steps:
+        print("Projected Average Validation Time: {:.4f} secs".format(np.mean(projected_val_time)))
 
     # Test
     print("Training ends")
     print("The epoch of the best result：", bestid)
     print("The valid loss of the best model", str(round(his_loss[bestid - 1], 4)))
-   
-    engine.model.load_state_dict(torch.load(path + "best_model.pth"))
+
+    if args.skip_test:
+        return
+
+    engine.model.load_state_dict(torch.load(path + "best_model.pth", map_location=device))
     
     test_outputs = []
     test_y = []
@@ -329,7 +405,7 @@ def main():
     print(log.format(np.mean(amse), np.mean(amae)))
 
 if __name__ == "__main__":
-    t1 = time.time()
+    t1 = time.perf_counter()
     main()
-    t2 = time.time()
+    t2 = time.perf_counter()
     print("Total time spent: {:.4f}".format(t2 - t1))
