@@ -13,6 +13,17 @@ if PROJECT_ROOT not in sys.path:
 from data_provider.data_loader_save import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom
 from gen_prompt_emb import GenPromptEmb
 
+
+def embedding_file_ready(file_path, d_model, num_nodes):
+    if not os.path.isfile(file_path):
+        return False
+    try:
+        with h5py.File(file_path, "r") as hf:
+            return hf["embeddings"].shape == (d_model, num_nodes)
+    except (OSError, KeyError):
+        return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda", help="")
@@ -91,14 +102,17 @@ def save_embeddings(args):
     completed = 0
     generated = 0
     started_at = time.perf_counter()
-    for x, y, x_mark, y_mark in data_loader:
+    for x, y, x_mark, y_mark`in data_loader:
         batch_indices = list(range(sample_offset, sample_offset + len(x)))
         output_paths = [
             os.path.join(save_path, f"{sample_index}.h5")
             for sample_index in batch_indices
         ]
 
-        if not args.overwrite and all(os.path.isfile(path) for path in output_paths):
+        if not args.overwrite and all(
+            embedding_file_ready(path, args.d_model, x.shape[2])
+            for path in output_paths
+        ):
             sample_offset += len(x)
             completed += len(x)
             continue
@@ -109,10 +123,14 @@ def save_embeddings(args):
 
         for batch_index, embedding in enumerate(embeddings):
             file_path = output_paths[batch_index]
-            if not args.overwrite and os.path.isfile(file_path):
+            if not args.overwrite and embedding_file_ready(
+                file_path, args.d_model, x.shape[2]
+            ):
                 continue
-            with h5py.File(file_path, 'w') as hf:
+            temporary_path = f"{file_path}.tmp"
+            with h5py.File(temporary_path, 'w') as hf:
                 hf.create_dataset('embeddings', data=embedding.numpy())
+            os.replace(temporary_path, file_path)
         sample_offset += len(embeddings)
         completed += len(embeddings)
         generated += len(embeddings)
