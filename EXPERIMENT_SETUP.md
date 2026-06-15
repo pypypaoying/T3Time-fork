@@ -53,13 +53,16 @@ For ILI, use `--output_len 24`. For the other datasets, use `96`.
 
 ## Timing Benchmark
 
-`embedding_mode=zeros` is timing-only. It preserves the model tensor shapes
-and forward/backward cost without waiting for GPT-2 preprocessing.
+The benchmark uses precomputed GPT-2 embeddings by default, so epoch timing
+includes the normal HDF5 loading overhead used by T3Time training. Generate
+the embeddings above before running:
 
 ```bash
 DEVICE=cuda BENCHMARK_STEPS=100 BENCHMARK_VAL_STEPS=30 \
   bash scripts/benchmark_weather_336.sh
 ```
 
-Use `DEVICE=cpu` when no GPU is available. Set both benchmark step variables
-to `0` to run complete training and validation loaders.
+Set both benchmark step variables to `0` to run complete training and
+validation loaders. `EMBEDDING_MODE=zeros` is available only for timing the
+model computation without embedding-file I/O; do not use that mode as the
+reported end-to-end T3Time epoch time.
