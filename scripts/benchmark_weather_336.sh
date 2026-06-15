@@ -11,13 +11,26 @@ device="${DEVICE:-cuda}"
 steps="${BENCHMARK_STEPS:-100}"
 val_steps="${BENCHMARK_VAL_STEPS:-30}"
 num_workers="${NUM_WORKERS:-4}"
-embedding_mode="zeros"
+embedding_mode="${EMBEDDING_MODE:-precomputed}"
+embed_root="${EMBED_ROOT:-./Embeddings}"
 
 echo "Benchmark configuration:"
 echo "  device=${device}"
-echo "  embedding_mode=${embedding_mode} (timing-only; no embedding files required)"
+echo "  embedding_mode=${embedding_mode}"
 echo "  train_steps=${steps} (0 means full epoch)"
 echo "  val_steps=${val_steps} (0 means full validation)"
+
+if [[ "$embedding_mode" == "precomputed" ]]; then
+  required_embedding="${embed_root}/Weather/seq336/train/0.h5"
+  if [[ ! -f "$required_embedding" ]]; then
+    echo "Missing Weather embeddings: ${required_embedding}" >&2
+    echo "Generate train/val embeddings first; see EXPERIMENT_SETUP.md." >&2
+    exit 1
+  fi
+elif [[ "$embedding_mode" != "zeros" ]]; then
+  echo "EMBEDDING_MODE must be 'precomputed' or 'zeros'." >&2
+  exit 2
+fi
 
 run_benchmark() {
   local horizon="$1"
@@ -40,6 +53,7 @@ run_benchmark() {
   python -u train.py \
     --device "$device" \
     --root_path ./dataset \
+    --embed_root "$embed_root" \
     --embedding_mode "$embedding_mode" \
     --data_path Weather \
     --num_nodes 21 \
