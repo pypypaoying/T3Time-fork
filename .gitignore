@@ -1,7 +1,9 @@
 /Results
 /Embeddings/
+/EmbeddingsBenchmark/
 /logs/
+/dataset/ECL.csv
+/dataset/Traffic.csv
 *.pyc
 */__pycache__/
 __pycache__/
-

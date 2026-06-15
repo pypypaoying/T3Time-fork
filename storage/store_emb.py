@@ -5,6 +5,11 @@ import time
 import h5py
 import argparse
 from torch.utils.data import DataLoader
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from data_provider.data_loader_save import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom
 from gen_prompt_emb import GenPromptEmb
 
@@ -21,9 +26,12 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="gpt2")
     parser.add_argument("--divide", type=str, default="train")
     parser.add_argument("--num_workers", type=int, default=min(10, os.cpu_count()))
+    parser.add_argument("--prompt_batch_size", type=int, default=8)
+    parser.add_argument("--root_path", type=str, default=os.path.join(PROJECT_ROOT, "dataset"))
+    parser.add_argument("--embed_root", type=str, default=os.path.join(PROJECT_ROOT, "Embeddings"))
     return parser.parse_args()
 
-def get_dataset(data_path, flag, input_len, output_len):
+def get_dataset(data_path, flag, input_len, output_len, root_path):
     datasets = {
         'ETTh1': Dataset_ETT_hour,
         'ETTh2': Dataset_ETT_hour,
@@ -31,13 +39,15 @@ def get_dataset(data_path, flag, input_len, output_len):
         'ETTm2': Dataset_ETT_minute
     }
     dataset_class = datasets.get(data_path, Dataset_Custom)
-    return dataset_class(flag=flag, size=[input_len, 0, output_len], data_path=data_path)
+    return dataset_class(
+        root_path=root_path, flag=flag, size=[input_len, 0, output_len], data_path=data_path
+    )
 
 def save_embeddings(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    train_set = get_dataset(args.data_path, 'train', args.input_len, args.output_len)
-    test_set = get_dataset(args.data_path, 'test', args.input_len, args.output_len)
-    val_set = get_dataset(args.data_path, 'val', args.input_len, args.output_len)
+    train_set = get_dataset(args.data_path, 'train', args.input_len, args.output_len, args.root_path)
+    test_set = get_dataset(args.data_path, 'test', args.input_len, args.output_len, args.root_path)
+    val_set = get_dataset(args.data_path, 'val', args.input_len, args.output_len, args.root_path)
 
     data_loader = {
         'train': DataLoader(train_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=args.num_workers),
@@ -52,21 +62,27 @@ def save_embeddings(args):
         model_name=args.model_name,
         d_model=args.d_model,
         layer=args.l_layers,
-        divide=args.divide
+        divide=args.divide,
+        prompt_batch_size=args.prompt_batch_size,
     ).to(device)
 
-    save_path = f"./Embeddings/{args.data_path}/{args.divide}/"
+    save_path = os.path.join(
+        args.embed_root, train_set.data_path_file, f"seq{args.input_len}", args.divide
+    )
     os.makedirs(save_path, exist_ok=True)
 
     emb_time_path = f"./Results/emb_logs/"
     os.makedirs(emb_time_path, exist_ok=True)
 
-    for i, (x, y, x_mark, y_mark) in enumerate(data_loader):
+    sample_offset = 0
+    for x, y, x_mark, y_mark in data_loader:
         embeddings = gen_prompt_emb.generate_embeddings(x.to(device), x_mark.to(device))
 
-        file_path = f"{save_path}{i}.h5"
-        with h5py.File(file_path, 'w') as hf:
-            hf.create_dataset('embeddings', data = embeddings.cpu().numpy())
+        for batch_index, embedding in enumerate(embeddings):
+            file_path = os.path.join(save_path, f"{sample_offset + batch_index}.h5")
+            with h5py.File(file_path, 'w') as hf:
+                hf.create_dataset('embeddings', data=embedding.numpy())
+        sample_offset += len(embeddings)
 
         # # Save and visualize the first sample
         # if i >= 0:
